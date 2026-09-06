@@ -1,0 +1,10 @@
+fastapi
+gradio
+insightface
+numpy
+onnxruntime
+opencv-python
+pillow
+pillow-heif
+python-multipart
+uvicorn

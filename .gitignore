@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+
+.venv/
+venv/
+env/
+
+.ipynb_checkpoints/
+
+# Local face data, embeddings, and generated outputs.
+data/
+gallery/*.pkl
+gallery/profiles.json
+gallery/crops/
+results/
