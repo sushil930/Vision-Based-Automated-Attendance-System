@@ -80,10 +80,27 @@ def find_best_match(
 
 
 def main() -> None:
-    image_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_IMAGE_DIR
-    if not image_dir.is_dir():
-        print(f"Directory not found: {image_dir}")
-        sys.exit(1)
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print("Usage: python add_samples.py [image_directory]")
+        print("\nAdds face samples from enrollment images to the multi-sample gallery.")
+        print(f"Default directory: {DEFAULT_IMAGE_DIR}")
+        sys.exit(0)
+
+    if len(sys.argv) > 1:
+        image_dir = Path(sys.argv[1])
+        if not image_dir.is_dir():
+            print(f"Directory not found: {image_dir}")
+            sys.exit(1)
+    else:
+        image_dir = DEFAULT_IMAGE_DIR
+        if not image_dir.is_dir():
+            image_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Created directory: {image_dir}")
+            print("Please place enrollment images (.jpg, .png, etc.) inside it and rerun:")
+            print("    python add_samples.py")
+            print("Or pass an image folder directly:")
+            print("    python add_samples.py <path_to_images>")
+            sys.exit(0)
 
     image_files = sorted(
         p for p in image_dir.iterdir()
@@ -91,6 +108,8 @@ def main() -> None:
     )
     if not image_files:
         print(f"No images found in: {image_dir}")
+        print("Please place image files (.jpg, .png, etc.) inside this directory, or run with a path:")
+        print("    python add_samples.py <path_to_images>")
         sys.exit(1)
 
     print("Loading InsightFace...")
