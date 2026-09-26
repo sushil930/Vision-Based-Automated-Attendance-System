@@ -14,7 +14,14 @@ import numpy as np
 from PIL import Image, ImageOps
 from pillow_heif import register_heif_opener
 
-from app import GALLERY_FILE, PROJECT_ROOT, get_model, load_gallery, recognize_face
+from app import (
+    GALLERY_FILE,
+    PROJECT_ROOT,
+    get_model,
+    load_gallery,
+    load_gallery_index,
+    recognize_faces_batch,
+)
 
 LOGGER = logging.getLogger(__name__)
 ADD_THRESHOLD = 0.70
@@ -41,7 +48,7 @@ def process_images(files: list[str]) -> tuple[str, list, list, list, gr.update, 
         return "No images uploaded.", [], [], [], gr.update(choices=[], value=[]), gr.update(interactive=False)
 
     try:
-        gallery = load_gallery()
+        gallery_index = load_gallery_index()
     except Exception as error:
         return f"Error loading gallery: {error}", [], [], [], gr.update(choices=[], value=[]), gr.update(interactive=False)
 
@@ -69,15 +76,22 @@ def process_images(files: list[str]) -> tuple[str, list, list, list, gr.update, 
             
         faces = model.get(image_bgr)
         total_faces += len(faces)
-        
+        if not faces:
+            continue
+
+        # Normalize all embeddings for this image, then match in one matmul.
+        kept_faces: list = []
+        normalized: list[np.ndarray] = []
         for face in faces:
             embedding = face.embedding.astype(np.float32)
             norm = np.linalg.norm(embedding)
             if norm == 0:
                 continue
-            embedding /= norm
-            
-            result = recognize_face(embedding, gallery)
+            kept_faces.append(face)
+            normalized.append(embedding / norm)
+
+        matches = recognize_faces_batch(normalized, gallery_index)
+        for face, embedding, result in zip(kept_faces, normalized, matches):
             score = result["score"]
             match_name = result["name"]
             student_id = result["student_id"]

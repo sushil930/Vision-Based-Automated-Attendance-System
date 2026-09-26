@@ -15,7 +15,14 @@ import gradio as gr
 import numpy as np
 from PIL import Image, ImageOps
 
-from app import GALLERY_FILE, PROJECT_ROOT, get_model, load_gallery, recognize_face
+from app import (
+    GALLERY_FILE,
+    PROJECT_ROOT,
+    get_model,
+    load_gallery,
+    load_gallery_index,
+    recognize_faces_batch,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -122,7 +129,7 @@ def detect_group_faces(
         original_rgb = decode_image(uploaded_file)
         annotated_bgr = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2BGR)
         faces = get_model().get(annotated_bgr)
-        gallery = load_gallery()
+        gallery_index = load_gallery_index()
     except Exception as error:
         LOGGER.exception("Could not detect faces")
         return None, [], [], [], f"Could not process the image: {error}"
@@ -131,13 +138,13 @@ def detect_group_faces(
         return original_rgb, [], [], [], "No faces detected. Use a clearer, well-lit group photo."
 
     faces = sorted(faces, key=lambda face: (face.bbox[1], face.bbox[0]))
+    matches = recognize_faces_batch([f.embedding for f in faces], gallery_index)
     detections: list[dict[str, Any]] = []
     preview_cards: list[tuple[np.ndarray, str]] = []
     assignment_rows: list[list[str]] = []
     registered_count = 0
 
-    for face in faces:
-        match = recognize_face(face.embedding, gallery)
+    for face, match in zip(faces, matches):
         if match["status"] == "MATCH":
             registered_count += 1
             continue

@@ -24,7 +24,8 @@ from app import (
     PROJECT_ROOT,
     get_model,
     load_gallery,
-    recognize_face,
+    load_gallery_index,
+    recognize_faces_batch,
     MATCH_THRESHOLD,
     MIN_MARGIN,
 )
@@ -116,9 +117,9 @@ def list_profiles():
 
 
 @app.post("/recognize")
-async def recognize(image: UploadFile = File(...)):
+def recognize(image: UploadFile = File(...)):
     """Recognize faces in an uploaded group photo."""
-    file_bytes = await image.read()
+    file_bytes = image.file.read()
     try:
         image_rgb = decode_upload(file_bytes)
     except Exception as exc:
@@ -126,13 +127,25 @@ async def recognize(image: UploadFile = File(...)):
 
     image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
     faces = get_model().get(image_bgr)
-    gallery = load_gallery()
 
-    results = []
+    if not faces:
+        empty = {"MATCH": 0, "REVIEW": 0, "UNKNOWN": 0}
+        return {
+            "total_faces": 0,
+            "counts": empty,
+            "results": [],
+            "annotated_b64": ndarray_to_b64jpg(
+                cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            ),
+        }
+
+    # One cached matrix + one matmul for all faces; sync endpoint so FastAPI
+    # runs the CPU-bound work in its threadpool instead of the event loop.
+    gallery_index = load_gallery_index()
+    results = recognize_faces_batch([f.embedding for f in faces], gallery_index)
     annotated = image_bgr.copy()
 
-    for idx, face in enumerate(faces, 1):
-        result = recognize_face(face.embedding, gallery)
+    for idx, (result, face) in enumerate(zip(results, faces), 1):
         x1, y1, x2, y2 = face.bbox.astype(int)
         x1, y1 = max(x1, 0), max(y1, 0)
         x2 = min(x2, annotated.shape[1])
@@ -148,14 +161,13 @@ async def recognize(image: UploadFile = File(...)):
         )
 
         crop = crop_face(image_rgb, face.bbox)
-        results.append({
-            "index": idx,
-            "name": display_name,
-            "student_id": result["student_id"] if result["status"] != "UNKNOWN" else "-",
-            "status": result["status"],
-            "score": round(result["score"], 3),
-            "crop_b64": ndarray_to_b64jpg(crop),
-        })
+        result["index"] = idx
+        result["name"] = display_name
+        result["student_id"] = (
+            result["student_id"] if result["status"] != "UNKNOWN" else "-"
+        )
+        result["score"] = round(result["score"], 3)
+        result["crop_b64"] = ndarray_to_b64jpg(crop)
 
     annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
     counts = {"MATCH": 0, "REVIEW": 0, "UNKNOWN": 0}
@@ -177,11 +189,11 @@ async def review(confirmed_indices: list[int] = Form(...)):
 
 
 @app.post("/register")
-async def register(
+def register(
     image: UploadFile = File(...),
 ):
     """Detect unregistered faces in a group photo for registration."""
-    file_bytes = await image.read()
+    file_bytes = image.file.read()
     try:
         image_rgb = decode_upload(file_bytes)
     except Exception as exc:
@@ -189,13 +201,13 @@ async def register(
 
     image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
     faces = get_model().get(image_bgr)
-    gallery = load_gallery()
 
     faces = sorted(faces, key=lambda f: (f.bbox[1], f.bbox[0]))
+    gallery_index = load_gallery_index()
+    matches = recognize_faces_batch([f.embedding for f in faces], gallery_index)
     unregistered = []
 
-    for face in faces:
-        match = recognize_face(face.embedding, gallery)
+    for face, match in zip(faces, matches):
         if match["status"] == "MATCH":
             continue
         embedding = normalize_embedding(face.embedding)
@@ -253,28 +265,38 @@ async def register_save(data: dict):
 
 
 @app.post("/add-samples")
-async def add_samples(images: list[UploadFile] = File(...)):
+def add_samples(images: list[UploadFile] = File(...)):
     """Process images and return proposed sample additions."""
-    gallery = load_gallery()
+    gallery_index = load_gallery_index()
     model = get_model()
     proposals = []
 
     for upload in images:
-        file_bytes = await upload.read()
+        file_bytes = upload.file.read()
         try:
             image_rgb = decode_upload(file_bytes)
         except Exception:
             continue
         image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
         faces = model.get(image_bgr)
+        if not faces:
+            continue
 
+        # Batch-normalize every face embedding from this image at once.
+        kept_faces = []
+        embeddings_list = []
         for face in faces:
             embedding = face.embedding.astype(np.float32)
             norm = np.linalg.norm(embedding)
             if norm == 0:
                 continue
-            embedding /= norm
-            result = recognize_face(embedding, gallery)
+            kept_faces.append(face)
+            embeddings_list.append(embedding / norm)
+
+        matches = recognize_faces_batch(embeddings_list, gallery_index)
+        for face, (embedding, result) in zip(
+            kept_faces, zip(embeddings_list, matches)
+        ):
             if result["score"] >= 0.55:
                 crop = crop_face(image_rgb, face.bbox)
                 proposals.append({

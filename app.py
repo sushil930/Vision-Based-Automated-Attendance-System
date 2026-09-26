@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import pickle
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -61,43 +62,123 @@ def cosine_similarity(first: np.ndarray, second: np.ndarray) -> float:
     return float(np.dot(first, second) / (first_norm * second_norm))
 
 
-def recognize_face(
-    face_embedding: np.ndarray, gallery: dict[str, dict[str, Any]]
-) -> dict[str, Any]:
-    """Classify one detected face against every stored gallery embedding."""
-    embedding = face_embedding.astype(np.float32)
-    person_results: list[dict[str, Any]] = []
+class GalleryIndex:
+    """Pre-normalized gallery embeddings stacked into one matrix.
 
-    for student_id, profile in gallery.items():
-        best_score = max(
-            (
-                cosine_similarity(
-                    embedding, np.asarray(stored_embedding, dtype=np.float32)
-                )
-                for stored_embedding in profile["embeddings"]
-            ),
-            default=-1.0,
+    All stored embeddings are L2-normalized once at load time and concatenated
+    into a single (total_embeddings, dim) float32 matrix. Row offsets track
+    where each student's block of embeddings starts, so per-person best scores
+    are computed with np.maximum.reduceat instead of nested Python loops.
+    Cosine similarity between two unit vectors equals their dot product, so
+    all per-pair norm computation disappears at query time.
+    """
+
+    __slots__ = ("ids", "names", "matrix", "starts", "empty")
+
+    def __init__(self, gallery: dict[str, dict[str, Any]]):
+        self.ids: list[str] = []
+        self.names: list[str] = []
+        starts: list[int] = []
+        rows: list[np.ndarray] = []
+        row_total = 0
+        for student_id, profile in gallery.items():
+            self.ids.append(str(student_id))
+            self.names.append(profile["name"])
+            starts.append(row_total)
+            embeddings = np.asarray(profile["embeddings"], dtype=np.float32)
+            if embeddings.ndim == 1:
+                embeddings = embeddings[None, :]
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            norms[norms == 0.0] = 1.0
+            rows.append(embeddings / norms)
+            row_total += len(embeddings)
+        self.empty = not rows
+        if self.empty:
+            self.matrix = np.zeros((0, 512), dtype=np.float32)
+            self.starts = np.zeros(0, dtype=np.intp)
+        else:
+            self.matrix = np.concatenate(rows, axis=0)
+            self.starts = np.asarray(starts, dtype=np.intp)
+
+
+_gallery_cache: dict[str, Any] = {}
+_gallery_lock = threading.Lock()
+
+
+def load_gallery_index() -> GalleryIndex:
+    """Load a cached GalleryIndex, rebuilding only when the pickle changes."""
+    stat = GALLERY_FILE.stat()
+    cache_key = (stat.st_mtime_ns, stat.st_size)
+    with _gallery_lock:
+        entry = _gallery_cache.get("index")
+        if entry is not None and entry[0] == cache_key:
+            return entry[1]
+    index = GalleryIndex(load_gallery())
+    with _gallery_lock:
+        _gallery_cache["index"] = (cache_key, index)
+    return index
+
+
+def _classify_scores(score: float, margin: float) -> str:
+    if score >= MATCH_THRESHOLD and margin >= MIN_MARGIN:
+        return "MATCH"
+    if score >= 0.45:
+        return "REVIEW"
+    return "UNKNOWN"
+
+
+def recognize_faces_batch(
+    face_embeddings: list[np.ndarray],
+    index: GalleryIndex | dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Classify all detected faces with one matrix product per request.
+
+    Accepts a GalleryIndex or a raw gallery dict (converted on the fly) so
+    every caller can pass whatever it already holds without extra work.
+    """
+    if isinstance(index, dict):
+        index = GalleryIndex(index)
+    unknown = {"student_id": "-", "name": "Unknown", "score": -1.0,
+               "margin": 1.0, "status": "UNKNOWN"}
+    if not face_embeddings or index.empty:
+        return [dict(unknown) for _ in face_embeddings]
+
+    queries = np.asarray(face_embeddings, dtype=np.float32)
+    if queries.ndim == 1:
+        queries = queries[None, :]
+    query_norms = np.linalg.norm(queries, axis=1, keepdims=True)
+    query_norms[query_norms == 0.0] = 1.0
+    queries /= query_norms
+
+    # One BLAS matmul replaces faces x people x samples cosine calls.
+    similarities = queries @ index.matrix.T
+
+    results: list[dict[str, Any]] = []
+    for row in similarities:
+        best_per_person = np.maximum.reduceat(row, index.starts)
+        order = np.argsort(best_per_person)[::-1]
+        top = int(order[0])
+        score = float(best_per_person[top])
+        margin = (
+            float(score - best_per_person[order[1]]) if len(order) > 1 else 1.0
         )
-        person_results.append(
+        results.append(
             {
-                "student_id": str(student_id),
-                "name": profile["name"],
-                "score": best_score,
+                "student_id": index.ids[top],
+                "name": index.names[top],
+                "score": score,
+                "margin": margin,
+                "status": _classify_scores(score, margin),
             }
         )
+    return results
 
-    person_results.sort(key=lambda result: result["score"], reverse=True)
-    best = person_results[0]
-    margin = best["score"] - person_results[1]["score"] if len(person_results) > 1 else 1.0
 
-    if best["score"] >= MATCH_THRESHOLD and margin >= MIN_MARGIN:
-        status = "MATCH"
-    elif best["score"] >= 0.45:
-        status = "REVIEW"
-    else:
-        status = "UNKNOWN"
-
-    return {**best, "margin": margin, "status": status}
+def recognize_face(
+    face_embedding: np.ndarray, gallery: dict[str, dict[str, Any]] | GalleryIndex
+) -> dict[str, Any]:
+    """Classify one detected face (thin wrapper over the batch matcher)."""
+    return recognize_faces_batch([face_embedding], index=gallery)[0]
 
 
 def recognize_group_image(
@@ -122,9 +203,8 @@ def recognize_group_image(
                 ImageOps.exif_transpose(uploaded_image).convert("RGB")
             )
         original_bgr = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2BGR)
-        annotated_bgr = original_bgr.copy()
-        faces = get_model().get(annotated_bgr)
-        gallery = load_gallery()
+        faces = get_model().get(original_bgr)
+        gallery_index = load_gallery_index()
     except Exception as error:  # Keep a bad file or model issue from taking down the UI.
         LOGGER.exception("Could not process uploaded image")
         return None, [], [], f"Could not process the image: {error}", [], [], empty_reviews
@@ -136,6 +216,7 @@ def recognize_group_image(
             [], [], empty_reviews,
         )
 
+    annotated_bgr = original_bgr.copy()
     cards: list[tuple[np.ndarray, str]] = []
     table_rows: list[list[str]] = []
     counts = {"MATCH": 0, "REVIEW": 0, "UNKNOWN": 0}
@@ -143,8 +224,12 @@ def recognize_group_image(
     review_cards: list[tuple[np.ndarray, str]] = []
     review_choices: list[str] = []
 
-    for index, face in enumerate(faces, start=1):
-        result = recognize_face(face.embedding, gallery)
+    # Recognize every face in one vectorized pass instead of per-face loops.
+    results = recognize_faces_batch(
+        [face.embedding for face in faces], gallery_index
+    )
+
+    for index, (face, result) in enumerate(zip(faces, results), start=1):
         counts[result["status"]] += 1
         x1, y1, x2, y2 = face.bbox.astype(int)
         x1, y1 = max(x1, 0), max(y1, 0)
