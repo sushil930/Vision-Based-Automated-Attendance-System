@@ -26,6 +26,10 @@ from app import (
     load_gallery,
     load_gallery_index,
     recognize_faces_batch,
+    preprocess_image,
+    format_timings,
+    StageTimer,
+    TIMING_ENABLED,
     MATCH_THRESHOLD,
     MIN_MARGIN,
 )
@@ -118,67 +122,88 @@ def list_profiles():
 
 @app.post("/recognize")
 def recognize(image: UploadFile = File(...)):
-    """Recognize faces in an uploaded group photo."""
-    file_bytes = image.file.read()
-    try:
-        image_rgb = decode_upload(file_bytes)
-    except Exception as exc:
-        raise HTTPException(400, f"Cannot decode image: {exc}")
+    """Recognize faces in an uploaded group photo.
 
-    image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
-    faces = get_model().get(image_bgr)
+    Per-stage timing is collected and logged when ATTENDANCE_TIMING=1.
+    Large images are downscaled before face detection to reduce decode+inference cost.
+    """
+    timers: list[tuple[str, float]] = []
+    file_bytes = image.file.read()
+
+    with StageTimer("decode", timers):
+        try:
+            image_rgb = decode_upload(file_bytes)
+        except Exception as exc:
+            raise HTTPException(400, f"Cannot decode image: {exc}")
+
+    with StageTimer("resize", timers):
+        image_rgb, _scale = preprocess_image(image_rgb)
+
+    with StageTimer("detection", timers):
+        image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+        faces = get_model().get(image_bgr)
 
     if not faces:
+        LOGGER.info(format_timings(timers))
         empty = {"MATCH": 0, "REVIEW": 0, "UNKNOWN": 0}
+        ok, buf = cv2.imencode(".jpg", image_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        annotated_b64 = base64.b64encode(buf.tobytes()).decode("ascii") if ok else ""
         return {
             "total_faces": 0,
             "counts": empty,
             "results": [],
-            "annotated_b64": ndarray_to_b64jpg(
-                cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-            ),
+            "annotated_b64": annotated_b64,
         }
 
-    # One cached matrix + one matmul for all faces; sync endpoint so FastAPI
-    # runs the CPU-bound work in its threadpool instead of the event loop.
     gallery_index = load_gallery_index()
-    results = recognize_faces_batch([f.embedding for f in faces], gallery_index)
-    annotated = image_bgr.copy()
 
-    for idx, (result, face) in enumerate(zip(results, faces), 1):
-        x1, y1, x2, y2 = face.bbox.astype(int)
-        x1, y1 = max(x1, 0), max(y1, 0)
-        x2 = min(x2, annotated.shape[1])
-        y2 = min(y2, annotated.shape[0])
+    with StageTimer("matching", timers):
+        results = recognize_faces_batch([f.embedding for f in faces], gallery_index)
 
-        colors = {"MATCH": (0, 180, 0), "REVIEW": (0, 180, 255), "UNKNOWN": (0, 0, 220)}
-        color = colors[result["status"]]
-        display_name = result["name"] if result["status"] != "UNKNOWN" else "Unknown"
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 3)
-        cv2.putText(
-            annotated, f"{display_name} {result['score']:.2f}",
-            (x1, max(y1 - 10, 25)), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2,
-        )
+    with StageTimer("annotation", timers):
+        annotated = image_bgr.copy()
 
-        crop = crop_face(image_rgb, face.bbox)
-        result["index"] = idx
-        result["name"] = display_name
-        result["student_id"] = (
-            result["student_id"] if result["status"] != "UNKNOWN" else "-"
-        )
-        result["score"] = round(result["score"], 3)
-        result["crop_b64"] = ndarray_to_b64jpg(crop)
+        for idx, (result, face) in enumerate(zip(results, faces), 1):
+            x1, y1, x2, y2 = face.bbox.astype(int)
+            x1, y1 = max(x1, 0), max(y1, 0)
+            x2 = min(x2, annotated.shape[1])
+            y2 = min(y2, annotated.shape[0])
 
-    annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+            colors = {"MATCH": (0, 180, 0), "REVIEW": (0, 180, 255), "UNKNOWN": (0, 0, 220)}
+            color = colors[result["status"]]
+            display_name = result["name"] if result["status"] != "UNKNOWN" else "Unknown"
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 3)
+            cv2.putText(
+                annotated, f"{display_name} {result['score']:.2f}",
+                (x1, max(y1 - 10, 25)), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2,
+            )
+
+            crop = crop_face(image_rgb, face.bbox)
+            result["index"] = idx
+            result["name"] = display_name
+            result["student_id"] = (
+                result["student_id"] if result["status"] != "UNKNOWN" else "-"
+            )
+            result["score"] = round(result["score"], 3)
+            result["crop_b64"] = ndarray_to_b64jpg(crop)
+
+        # annotated is already BGR: encode directly instead of the
+        # RGB round-trip ndarray_to_b64jpg would perform (saves 2 full-image
+        # cvtColor calls per request).
+        ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        annotated_b64 = base64.b64encode(buf.tobytes()).decode("ascii") if ok else ""
+
     counts = {"MATCH": 0, "REVIEW": 0, "UNKNOWN": 0}
     for r in results:
         counts[r["status"]] += 1
+
+    LOGGER.info(format_timings(timers))
 
     return {
         "total_faces": len(faces),
         "counts": counts,
         "results": results,
-        "annotated_b64": ndarray_to_b64jpg(annotated_rgb),
+        "annotated_b64": annotated_b64,
     }
 
 
@@ -189,24 +214,31 @@ async def review(confirmed_indices: list[int] = Form(...)):
 
 
 @app.post("/register")
-def register(
-    image: UploadFile = File(...),
-):
+def register(image: UploadFile = File(...)):
     """Detect unregistered faces in a group photo for registration."""
+    timers: list[tuple[str, float]] = []
     file_bytes = image.file.read()
-    try:
-        image_rgb = decode_upload(file_bytes)
-    except Exception as exc:
-        raise HTTPException(400, f"Cannot decode image: {exc}")
 
-    image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
-    faces = get_model().get(image_bgr)
+    with StageTimer("decode", timers):
+        try:
+            image_rgb = decode_upload(file_bytes)
+        except Exception as exc:
+            raise HTTPException(400, f"Cannot decode image: {exc}")
+
+    with StageTimer("resize", timers):
+        image_rgb, _scale = preprocess_image(image_rgb)
+
+    with StageTimer("detection", timers):
+        image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+        faces = get_model().get(image_bgr)
 
     faces = sorted(faces, key=lambda f: (f.bbox[1], f.bbox[0]))
     gallery_index = load_gallery_index()
-    matches = recognize_faces_batch([f.embedding for f in faces], gallery_index)
-    unregistered = []
 
+    with StageTimer("matching", timers):
+        matches = recognize_faces_batch([f.embedding for f in faces], gallery_index)
+
+    unregistered = []
     for face, match in zip(faces, matches):
         if match["status"] == "MATCH":
             continue
@@ -216,6 +248,8 @@ def register(
             "embedding": embedding.tolist(),
             "crop_b64": ndarray_to_b64jpg(crop),
         })
+
+    LOGGER.info(format_timings(timers))
 
     return {
         "total_faces": len(faces),
@@ -270,30 +304,39 @@ def add_samples(images: list[UploadFile] = File(...)):
     gallery_index = load_gallery_index()
     model = get_model()
     proposals = []
+    timers: list[tuple[str, float]] = []
 
     for upload in images:
         file_bytes = upload.file.read()
-        try:
-            image_rgb = decode_upload(file_bytes)
-        except Exception:
-            continue
-        image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
-        faces = model.get(image_bgr)
+        with StageTimer("decode", timers):
+            try:
+                image_rgb = decode_upload(file_bytes)
+            except Exception:
+                continue
+
+        with StageTimer("resize", timers):
+            image_rgb, _scale = preprocess_image(image_rgb)
+
+        with StageTimer("detection", timers):
+            image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+            faces = model.get(image_bgr)
         if not faces:
             continue
 
         # Batch-normalize every face embedding from this image at once.
-        kept_faces = []
-        embeddings_list = []
-        for face in faces:
-            embedding = face.embedding.astype(np.float32)
-            norm = np.linalg.norm(embedding)
-            if norm == 0:
-                continue
-            kept_faces.append(face)
-            embeddings_list.append(embedding / norm)
+        with StageTimer("matching", timers):
+            kept_faces = []
+            embeddings_list = []
+            for face in faces:
+                embedding = face.embedding.astype(np.float32)
+                norm = np.linalg.norm(embedding)
+                if norm == 0:
+                    continue
+                kept_faces.append(face)
+                embeddings_list.append(embedding / norm)
 
-        matches = recognize_faces_batch(embeddings_list, gallery_index)
+            matches = recognize_faces_batch(embeddings_list, gallery_index)
+
         for face, (embedding, result) in zip(
             kept_faces, zip(embeddings_list, matches)
         ):
@@ -308,6 +351,7 @@ def add_samples(images: list[UploadFile] = File(...)):
                     "crop_b64": ndarray_to_b64jpg(crop),
                 })
 
+    LOGGER.info(format_timings(timers))
     return {"proposals": proposals}
 
 

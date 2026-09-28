@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import pickle
 import threading
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -23,20 +25,47 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 GALLERY_FILE = PROJECT_ROOT / "gallery" / "multi_sample_gallery.pkl"
 MATCH_THRESHOLD = 0.55
 MIN_MARGIN = 0.05
-DETECTION_SIZE = (640, 640)
 
+# ---------------------------------------------------------------------------
+# Pipeline configuration (single source of truth; overridable via env vars)
+# ---------------------------------------------------------------------------
+MODEL_NAME = os.environ.get("ATTENDANCE_MODEL", "buffalo_l")
+DET_SIZE = (
+    int(os.environ.get("ATTENDANCE_DET_SIZE", "640")),
+    int(os.environ.get("ATTENDANCE_DET_SIZE", "640")),
+)
+MAX_IMAGE_SIZE = int(os.environ.get("ATTENDANCE_MAX_IMAGE_SIZE", "1280"))
+
+# Per-stage timing logs are emitted only when this is enabled.
+TIMING_ENABLED = os.environ.get("ATTENDANCE_TIMING", "1") == "1"
 
 # Register HEIC/HEIF support before Gradio or Pillow opens uploaded images.
 register_heif_opener()
 
 
-@lru_cache(maxsize=1)
-def get_model() -> FaceAnalysis:
-    """Load the InsightFace model once per running web application."""
-    LOGGER.info("Loading InsightFace model")
-    model = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-    model.prepare(ctx_id=0, det_size=DETECTION_SIZE)
+@lru_cache(maxsize=8)
+def _get_model_cached(name: str, det_w: int, det_h: int) -> FaceAnalysis:
+    """Load, prepare, and warm up one model per (name, det_size) combination.
+
+    The dummy inference ensures ONNX Runtime / ArcFace initialization is not
+    charged to the first real request. Called once per config, not per request.
+    """
+    LOGGER.info("Loading InsightFace model %s det_size=%s", name, (det_w, det_h))
+    model = FaceAnalysis(name=name, providers=["CPUExecutionProvider"])
+    model.prepare(ctx_id=0, det_size=(det_w, det_h))
+    dummy = np.zeros((det_w, det_h, 3), dtype=np.uint8)
+    model.get(dummy)
     return model
+
+
+def get_model() -> FaceAnalysis:
+    """Load the configured InsightFace model once per running application."""
+    return _get_model_cached(MODEL_NAME, DET_SIZE[0], DET_SIZE[1])
+
+
+def get_model_for(name: str, det_size: tuple[int, int]) -> FaceAnalysis:
+    """Return a (cached) model for a specific benchmark configuration."""
+    return _get_model_cached(name, det_size[0], det_size[1])
 
 
 def load_gallery() -> dict[str, dict[str, Any]]:
@@ -51,6 +80,82 @@ def load_gallery() -> dict[str, dict[str, Any]]:
         raise ValueError("The gallery is empty or is not a multi-sample gallery.")
 
     return gallery
+
+
+class StageTimer:
+    """Context manager that records elapsed time for one pipeline stage.
+
+    Usage:
+        with StageTimer("decode") as t:
+            image = decode_upload(...)
+        print(f"decode={t.elapsed_ms():.0f}ms")  # logs at INFO level if TIMING_ENABLED
+
+    Or collect multiple stages and format at the end:
+        timers = []
+        with StageTimer("decode", timers) as t:
+            ...
+        print(format_timings(timers))  # decode=120ms resize=35ms ...
+    """
+
+    _log: list[tuple[str, float]] | None = None
+
+    def __init__(
+        self,
+        name: str,
+        log: list[tuple[str, float]] | None = None,
+    ):
+        self.name = name
+        self._log = log
+        self._start: float | None = None
+        self.elapsed_ms_val: float = 0.0
+
+    def __enter__(self) -> "StageTimer":
+        self._start = time.perf_counter()
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.elapsed_ms_val = (time.perf_counter() - self._start) * 1000.0
+        if self._log is not None:
+            self._log.append((self.name, self.elapsed_ms_val))
+        elif TIMING_ENABLED:
+            LOGGER.info("%s=%.0fms", self.name, self.elapsed_ms_val)
+
+    def elapsed_ms(self) -> float:
+        return self.elapsed_ms_val
+
+
+def format_timings(timers: list[tuple[str, float]]) -> str:
+    """Format a list of (stage_name, ms) as a compact log line."""
+    parts = [f"{name}={ms:.0f}ms" for name, ms in timers]
+    total = sum(ms for _, ms in timers)
+    parts.append(f"total={total:.0f}ms")
+    return " ".join(parts)
+
+
+def preprocess_image(image_rgb: np.ndarray) -> tuple[np.ndarray, float]:
+    """Downscale large images to MAX_IMAGE_SIZE on the longest edge.
+
+    Returns (resized, scale_factor) where scale_factor is < 1.0 when resizing
+    occurred (enables bbox rescaling) and 1.0 otherwise.
+
+    The scale factor uses the same coordinate space as the InsightFace bboxes
+    so bounding boxes from the model can be rescaled back if needed:
+        bbox_resized = bbox_original / scale_factor
+    """
+    h, w = image_rgb.shape[:2]
+    longest = max(w, h)
+    if longest <= MAX_IMAGE_SIZE:
+        return image_rgb, 1.0
+
+    scale = MAX_IMAGE_SIZE / longest
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    resized = cv2.resize(
+        image_rgb,
+        (new_w, new_h),
+        interpolation=cv2.INTER_AREA,
+    )
+    return resized, scale
 
 
 def cosine_similarity(first: np.ndarray, second: np.ndarray) -> float:
@@ -202,21 +307,23 @@ def recognize_group_image(
             original_rgb = np.asarray(
                 ImageOps.exif_transpose(uploaded_image).convert("RGB")
             )
-        original_bgr = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2BGR)
-        faces = get_model().get(original_bgr)
+        # TASK 4: downscale before inference on large images.
+        image_rgb, _scale = preprocess_image(original_rgb)
+        image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+        faces = get_model().get(image_bgr)
         gallery_index = load_gallery_index()
-    except Exception as error:  # Keep a bad file or model issue from taking down the UI.
+    except Exception as error:
         LOGGER.exception("Could not process uploaded image")
         return None, [], [], f"Could not process the image: {error}", [], [], empty_reviews
 
     if not faces:
         return (
-            original_rgb, [], [],
+            cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB), [], [],
             "No faces detected. Try a sharper, well-lit group photo.",
             [], [], empty_reviews,
         )
 
-    annotated_bgr = original_bgr.copy()
+    annotated_bgr = image_bgr.copy()
     cards: list[tuple[np.ndarray, str]] = []
     table_rows: list[list[str]] = []
     counts = {"MATCH": 0, "REVIEW": 0, "UNKNOWN": 0}
@@ -258,9 +365,9 @@ def recognize_group_image(
 
         padding_x = int((x2 - x1) * 0.3)
         padding_y = int((y2 - y1) * 0.4)
-        crop = original_rgb[
-            max(0, y1 - padding_y) : min(original_rgb.shape[0], y2 + padding_y),
-            max(0, x1 - padding_x) : min(original_rgb.shape[1], x2 + padding_x),
+        crop = image_rgb[
+            max(0, y1 - padding_y) : min(image_rgb.shape[0], y2 + padding_y),
+            max(0, x1 - padding_x) : min(image_rgb.shape[1], x2 + padding_x),
         ]
         cards.append((crop, f"{display_name} - {result['status']} ({result['score']:.3f})"))
         table_rows.append(
