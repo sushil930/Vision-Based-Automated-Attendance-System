@@ -2,10 +2,11 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:share_plus/share_plus.dart';
 
 import '../../app/services.dart';
 import '../../core/constants/pipeline_config.dart';
+import '../../domain/entities/entities.dart';
+import '../../domain/services/backup_service.dart';
 
 /// Settings (Section 19): model information, storage usage, clear face data,
 /// clear attendance data, privacy, about. Thresholds are developer-only and
