@@ -157,6 +157,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SnackBar(content: Text('Nothing to export yet')));
         return;
       }
+      if (!context.mounted) return;
       final choice = await showModalBottomSheet<String>(
         context: context,
         builder: (sheetContext) => SafeArea(
@@ -220,6 +221,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SnackBar(content: Text('No backups found')));
         return;
       }
+      if (!context.mounted) return;
       final choice = await showModalBottomSheet<File>(
         context: context,
         builder: (sheetContext) => SafeArea(

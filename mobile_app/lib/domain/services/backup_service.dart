@@ -19,9 +19,10 @@ import '../../data/db/database.dart';
 /// mixing embedding spaces (Section 34). Restore runs in one transaction
 /// (Section 51).
 class BackupService {
-  BackupService(this._appDb);
+  BackupService(this._appDb, {this.backupDirectory});
 
   final AppDatabase _appDb;
+  final Directory? backupDirectory;
 
   Database get db => _appDb.db;
 
@@ -140,6 +141,10 @@ class BackupService {
   }
 
   Future<Directory> backupDir() async {
+    final override = backupDirectory;
+    if (override != null) {
+      return override;
+    }
     final docs = await getApplicationDocumentsDirectory();
     final dir = Directory('${docs.path}/backups');
     if (!dir.existsSync()) {
