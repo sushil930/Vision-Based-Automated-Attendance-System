@@ -123,23 +123,146 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Future<void> _shareAppData(BuildContext context) async {
+  /// Section 32: CSV/JSON export via Android share, offline only.
+  Future<void> _exportAttendance(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
     try {
-      final dir = await getApplicationDocumentsDirectory();
-      final dbFile = File('${dir.path}/attendance.db');
-      if (!dbFile.existsSync()) {
-        if (!context.mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('No database file to export yet')));
+      final services = AppServices.instance;
+      final sessions = await services.attendance.listSessions();
+      final classes = {for (final c in await services.classes.listAll()) c.id: c.name};
+      final subjects = {
+        for (final s in await services.subjects.listAll()) s.id: s.name
+      };
+      final studentsById = <String, Student>{};
+      for (final c in await services.classes.listAll()) {
+        for (final s in await services.students.listForClass(c.id)) {
+          studentsById[s.id] = s;
+        }
+      }
+      final records = <AttendanceRecord>[];
+      for (final session in sessions) {
+        records.addAll(await services.attendance.recordsForSession(session.id));
+      }
+
+      final rows = services.exportService.buildRows(
+        sessions: sessions,
+        records: records,
+        students: studentsById,
+        classNames: classes,
+        subjectNames: subjects,
+      );
+      if (rows.isEmpty) {
+        messenger.showSnackBar(
+            const SnackBar(content: Text('Nothing to export yet')));
         return;
       }
-      await SharePlus.instance.share(
-        ShareParams(files: [XFile(dbFile.path)]),
+      final choice = await showModalBottomSheet<String>(
+        context: context,
+        builder: (sheetContext) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.table_chart),
+                title: const Text('Export as CSV'),
+                onTap: () => Navigator.of(sheetContext).pop('csv'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.data_object),
+                title: const Text('Export as JSON'),
+                onTap: () => Navigator.of(sheetContext).pop('json'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (choice == null || !context.mounted) return;
+      final content = choice == 'csv'
+          ? services.exportService.toCsv(rows)
+          : services.exportService.toJson(rows);
+      final file = await services.exportService.writeTemp(
+        'attendance_export_${DateTime.now().millisecondsSinceEpoch}.${choice == 'csv' ? 'csv' : 'json'}',
+        content,
+      );
+      await services.exportService.share(file);
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Export failed: $e')));
+    }
+  }
+
+  /// Section 33: versioned local backup.
+  Future<void> _createBackup(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final file = await AppServices.instance.backupService.createBackup();
+      messenger.showSnackBar(
+        SnackBar(content: Text('Backup saved: ${file.path.split(Platform.pathSeparator).last}')),
       );
     } catch (e) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Export failed: $e')));
+      messenger.showSnackBar(SnackBar(content: Text('Backup failed: $e')));
+    }
+  }
+
+  /// Section 33: restore with compatibility validation.
+  Future<void> _restoreBackup(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final dir = await AppServices.instance.backupService.backupDir();
+      final files = dir
+          .listSync()
+          .whereType<File>()
+          .where((f) => f.path.endsWith('.json'))
+          .toList()
+        ..sort((a, b) => b.path.compareTo(a.path));
+      if (files.isEmpty) {
+        messenger.showSnackBar(
+            const SnackBar(content: Text('No backups found')));
+        return;
+      }
+      final choice = await showModalBottomSheet<File>(
+        context: context,
+        builder: (sheetContext) => SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              for (final f in files)
+                ListTile(
+                  leading: const Icon(Icons.description),
+                  title: Text(f.path.split(Platform.pathSeparator).last),
+                  onTap: () => Navigator.of(sheetContext).pop(f),
+                ),
+            ],
+          ),
+        ),
+      );
+      if (choice == null || !context.mounted) return;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Restore backup?'),
+          content: const Text(
+              'This replaces all current classes, students, faces and '
+              'attendance with the backup contents.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Restore'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !context.mounted) return;
+      final result =
+          await AppServices.instance.backupService.restore(choice);
+      messenger.showSnackBar(SnackBar(content: Text(result.toString())));
+    } on IncompatibleBackupException catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text(e.toString())));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Restore failed: $e')));
     }
   }
 
