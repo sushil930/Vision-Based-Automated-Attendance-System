@@ -14,10 +14,12 @@ class PipelineConfig {
   static const bool allowUpscale = false;
 
   /// Model identity recorded with every stored embedding (Section 34).
-  /// TODO(Phase1): replace with values measured in the model benchmark.
+  /// embeddingDimension = 192 matches the bundled MobileFaceNet (9925_9680
+  /// conversion): its output tensor is [1, 192]. Mobile is its OWN embedding
+  /// space — desktop buffalo_l 512-d vectors are never mixed in (Section 34).
   static const String modelId = 'mobileface_v1';
   static const String modelVersion = '1';
-  static const int embeddingDimension = 512;
+  static const int embeddingDimension = 192;
   static const String preprocessingVersion = 'preprocess_v1';
 
   /// Recognition decision thresholds (Section 15).

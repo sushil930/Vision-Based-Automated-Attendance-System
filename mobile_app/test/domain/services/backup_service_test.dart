@@ -78,8 +78,8 @@ void main() {
       Student(id: 'st1', classId: 'c1', rollNumber: '1', name: 'Ravi'),
     );
     await embeddings.saveProfileWithEmbeddings(studentId: 'st1', samples: [
-      List<double>.filled(512, 0.1),
-      List<double>.filled(512, 0.2),
+      List<double>.filled(PipelineConfig.embeddingDimension, 0.1),
+      List<double>.filled(PipelineConfig.embeddingDimension, 0.2),
     ]);
 
     final file = await backup.createBackup();

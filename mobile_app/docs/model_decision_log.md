@@ -17,9 +17,9 @@
 | Recognizer size | 5,111 KB (5.0 MB) |
 | model_id | `mobileface_v1` |
 | model_version | `1` |
-| embedding_dimension | 512 |
+| embedding_dimension | 192 (measured from the bundled model's output tensor [1, 192]) |
 | preprocessing_version | `preprocess_v1` |
-| input size | 112x112 NHWC float32 |
+| input size | 112x112 NHWC float32 (TOCO export hardcodes batch=2; single faces are fed as duplicated rows, first output row used) |
 | normalization | (px - 127.5) / 127.5, RGB channel order |
 | alignment | eye-line rotation via MLKit eye landmarks, desktop-parity padding (30% x / 40% y) |
 

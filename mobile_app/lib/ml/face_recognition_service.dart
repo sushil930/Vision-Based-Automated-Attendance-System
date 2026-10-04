@@ -57,17 +57,33 @@ class GroupFaceResult {
 /// Loads the recognizer once, warms up once, reports versions, releases
 /// resources (Section 48). Screens never initialize models themselves.
 class ModelManager {
-  ModelManager({this.recognizerAsset = 'models/face_recognizer.tflite'});
+  // Path must include the 'assets/' prefix: tflite_flutter's fromAsset
+  // resolves it via rootBundle.load(assetFileName) directly.
+  ModelManager({this.recognizerAsset = 'assets/models/face_recognizer.tflite'});
 
   final String recognizerAsset;
 
   Interpreter? _recognizer;
   bool _initialized = false;
+  List<int> _inputShape = const [1, 112, 112, 3];
+  List<int> _outputShape = const [1, PipelineConfig.embeddingDimension];
+  int _inputBatch = 1;
 
   bool get isInitialized => _initialized;
-  int get embeddingDimension => PipelineConfig.embeddingDimension;
-  String get modelId => PipelineConfig.modelId;
-  String get modelVersion => PipelineConfig.modelVersion;
+
+  /// Embedding dimension read from the loaded model at runtime (falls back
+  /// to PipelineConfig before initialization).
+  int get embeddingDimension =>
+      _outputShape.isEmpty ? PipelineConfig.embeddingDimension : _outputShape.last;
+
+  /// Batch axis of the (possibly resized) model input.
+  int get inputBatch => _inputBatch;
+
+  /// Total float elements of one batched model input.
+  int get inputFlatLength => _inputShape.fold<int>(1, (a, b) => a * b);
+
+  /// Total float elements of one batched model output.
+  int get outputFlatLength => _outputShape.fold<int>(1, (a, b) => a * b);
 
   /// Loads the recognizer once and runs one dummy inference so the first real
   /// request is not charged for init (desktop parity, Section 25).
@@ -75,21 +91,40 @@ class ModelManager {
     if (_initialized) {
       return;
     }
+    // Interpreter._create allocates tensors with the model's native shapes.
     final interpreter = await Interpreter.fromAsset(
       recognizerAsset,
       options: InterpreterOptions()..threads = 4,
     );
+
+    _inputShape = interpreter.getInputTensor(0).shape;
+    _outputShape = interpreter.getOutputTensor(0).shape;
+    // The bundled MobileFaceNet TOCO export hardcodes batch=2 through the
+    // whole graph, so resizing the axis breaks AllocateTensors. Keep the
+    // native batch and feed duplicated rows instead (see extractEmbedding).
+    _inputBatch = _inputShape[0];
     _recognizer = interpreter;
     _initialized = true;
 
     // One-time warmup on a zero input.
-    final input = Float32List(
-      interpreter.getInputTensor(0).shape.fold<int>(1, (a, b) => a * b),
-    );
-    final out = Float32List(embeddingDimension);
+    final input = Float32List(inputFlatLength);
     interpreter.getInputTensor(0).setTo(input);
     interpreter.invoke();
-    interpreter.getOutputTensor(0).copyTo(out);
+    interpreter.getOutputTensor(0).copyTo(shapedOutput());
+  }
+
+  /// Builds a nested output object matching the output tensor's shape —
+  /// copyTo requires the destination's shape to equal the tensor's shape
+  /// (a flat list of the same length is rejected).
+  Object shapedOutput() {
+    Object build(List<int> dims) {
+      if (dims.length <= 1) {
+        return List<double>.filled(dims.isEmpty ? 0 : dims[0], 0);
+      }
+      return List.generate(dims[0], (_) => build(dims.sublist(1)));
+    }
+
+    return build(_outputShape);
   }
 
   Interpreter get recognizer {
@@ -182,19 +217,46 @@ class FaceRecognizerService {
   static const int inputSize = 112;
 
   /// Extract an L2-normalized embedding for one preprocessed face input.
+  /// `modelInput` is a single face ([1, size, size, 3] flat). If the loaded
+  /// model kept a fixed batch > 1, the crop is duplicated across the batch
+  /// axis and the first output row is used.
   List<double> extractEmbedding(Float32List modelInput) {
     final interpreter = _manager.recognizer;
-    interpreter.getInputTensor(0).setTo(modelInput);
+    final batch = _manager.inputBatch;
+    final perItem = modelInput.length;
+    final fullInput = batch == 1
+        ? modelInput
+        : (Float32List(perItem * batch)
+          ..setRange(0, perItem, modelInput));
+    if (batch > 1) {
+      for (int b = 1; b < batch; b++) {
+        fullInput.setRange(b * perItem, (b + 1) * perItem, modelInput);
+      }
+    }
+    interpreter.getInputTensor(0).setTo(fullInput);
     interpreter.invoke();
-    final out = Float32List(_manager.embeddingDimension);
-    interpreter.getOutputTensor(0).copyTo(out);
+    // copyTo returns the converted object shaped like the output tensor:
+    // [batch][dim] for the batch-2 export, [dim] for a batch-1 graph.
+    final outObj = interpreter.getOutputTensor(0).copyTo(_manager.shapedOutput());
+    final dim = _manager.embeddingDimension;
+    final List<double> embedding;
+    if (outObj is List && outObj.isNotEmpty && outObj.first is List) {
+      // Duplicated batch rows share the same input -> identical outputs.
+      embedding = (outObj.first as List).cast<double>();
+    } else {
+      embedding = (outObj as List).cast<double>();
+    }
+    if (embedding.length != dim) {
+      throw StateError(
+          'Recognizer output dim ${embedding.length} != expected $dim');
+    }
 
     var norm = 0.0;
-    for (final v in out) {
+    for (final v in embedding) {
       norm += v * v;
     }
     norm = norm <= 0 ? 1.0 : math.sqrt(norm);
-    return [for (final v in out) v / norm];
+    return [for (final v in embedding) v / norm];
   }
 }
 

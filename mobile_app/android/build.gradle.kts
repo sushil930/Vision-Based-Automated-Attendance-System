@@ -28,9 +28,19 @@ subprojects {
     // so a single global value cannot work; read each Android extension's
     // compileOptions after evaluation.
     afterEvaluate {
+        val androidExt =
+            project.extensions.findByType<com.android.build.gradle.BaseExtension>()
+        androidExt?.let { ext ->
+            // Force every Android library subproject to compileSdk 36 (max).
+            // - tflite_flutter declares 31 while its androidx dependencies
+            //   require 34+ -> must be raised.
+            // - sqflite_android inherits flutter.compileSdkVersion (36) and
+            //   uses VERSION_CODES.BAKLAVA / Locale.of() -> must NOT be
+            //   lowered. Forcing 36 is safe for every plugin since it is the
+            //   highest installed platform (android-36 + build-tools 36).
+            ext.compileSdkVersion(36)
+        }
         tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-            val androidExt =
-                project.extensions.findByType<com.android.build.gradle.BaseExtension>()
             val javaTarget =
                 androidExt?.compileOptions?.targetCompatibility?.toString() ?: "1.8"
             compilerOptions {
