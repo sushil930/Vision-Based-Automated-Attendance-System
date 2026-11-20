@@ -1,6 +1,7 @@
 fastapi
 gradio
 insightface
+jinja2
 numpy
 onnxruntime
 opencv-python
