@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Attendance - Face Recognition</title>
+<style>
+  /* OpenAI-derived design system (openai-DESIGN.md):
+     light interface, muted purple-gray primary #8e8ea0, black body text,
+     system-ui type stack, strict 8px spacing grid, 5px radius, flat surfaces
+     (no shadows), uniform 400ms ease motion, single 768px breakpoint. */
+  :root {
+    --bg: #ffffff; --panel: #ffffff; --panel2: #f7f7f8; --line: #ececf1;
+    --text: #000000; --muted: #8e8ea0; --primary: #8e8ea0; --primary-hover: #7f7f91;
+    --ok: #1a7f4e; --ok-bg: #e9f5ee; --warn: #8a6116; --warn-bg: #fbf3e2;
+    --bad: #a33b3b; --bad-bg: #fbeaea; --radius: 5px; --dur: 400ms;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--text);
+         font-size: 16px; line-height: 1.5; }
+
+  /* ---------- header ---------- */
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 16px;
+           padding: 16px 24px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 1.25rem; font-weight: 700; margin: 0; letter-spacing: .3px; color: var(--text); }
+  header h1 span { color: var(--muted); }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+  .chip { background: var(--panel2); border: 1px solid var(--line); border-radius: var(--radius);
+          padding: 8px 16px; font-size: .8rem; color: var(--muted); line-height: 1.5; }
+  .chip b { color: var(--text); font-weight: 600; }
+  #token-wrap { display: none; width: 100%; gap: 8px; align-items: center;
+                padding-top: 8px; font-size: .8rem; color: var(--muted); }
+  #token-wrap.show { display: flex; }
+  #token { background: var(--bg); border: 1px solid var(--line); color: var(--text);
+           border-radius: var(--radius); padding: 8px 16px; width: 220px; font-size: .8rem; }
+
+  /* ---------- nav ---------- */
+  nav { display: flex; gap: 8px; padding: 16px 24px 0; flex-wrap: wrap; }
+  nav button { background: none; border: none; color: var(--muted); font-size: .92rem;
+               font-family: inherit; padding: 8px 16px; cursor: pointer;
+               border-radius: var(--radius); border-bottom: 2px solid transparent;
+               transition: color var(--dur) ease, background var(--dur) ease; }
+  nav button:hover { color: var(--text); }
+  nav button.active { color: var(--text); border-bottom-color: var(--primary); background: var(--panel2); }
+  main { padding: 24px 24px 64px; max-width: 1180px; margin: 0 auto; }
+  section.tab { display: none; }
+  section.tab.active { display: block; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+          padding: 24px; margin-bottom: 16px; }
+  .card h2 { margin: 0 0 8px; font-size: 1.25rem; font-weight: 600; color: var(--text); }
+  .card p.hint { margin: 0 0 16px; color: var(--muted); font-size: .875rem; line-height: 1.5; }
+
+  /* ---------- interactive ---------- */
+  .drop { border: 2px dashed var(--line); border-radius: var(--radius); padding: 32px;
+          text-align: center; color: var(--muted); cursor: pointer; font-size: .9rem;
+          transition: border-color var(--dur) ease, background var(--dur) ease, color var(--dur) ease; }
+  .drop:hover, .drop.drag { border-color: var(--primary); color: var(--text); background: var(--panel2); }
+  .btn { background: var(--primary); border: none; color: #ffffff; padding: 12px 24px;
+         border-radius: var(--radius); cursor: pointer; font-size: .88rem; font-weight: 600;
+         font-family: inherit; min-height: 44px;
+         transition: background var(--dur) ease, border-color var(--dur) ease, opacity var(--dur) ease; }
+  .btn:hover { background: var(--primary-hover); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); font-weight: 400; }
+  .btn.ghost:hover { border-color: var(--primary); background: var(--panel2); }
+  .btn.small { padding: 8px 16px; font-size: .78rem; min-height: 0; }
+  .btn.danger { background: var(--bad); }
+  .btn.danger:hover { background: #8f3232; }
+  button:focus-visible, input:focus-visible, .drop:focus-visible {
+    outline: 2px solid var(--primary); outline-offset: 2px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 16px; }
+
+  /* ---------- badges / status ---------- */
+  .badges { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 16px; }
+  .badge { padding: 4px 12px; border-radius: var(--radius); font-size: .78rem; font-weight: 600; }
+  .badge.match, .badge.learned, .status.MATCH { background: var(--ok-bg); color: var(--ok); }
+  .badge.review, .status.REVIEW { background: var(--warn-bg); color: var(--warn); }
+  .badge.unknown, .status.UNKNOWN { background: var(--bad-bg); color: var(--bad); }
+  .badge.dim { background: var(--panel2); color: var(--muted); }
+
+  /* ---------- face cards ---------- */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 16px; }
+  .face { background: var(--panel2); border: 1px solid var(--line); border-radius: var(--radius);
+          padding: 16px; display: flex; gap: 16px;
+          transition: outline-color var(--dur) ease, opacity var(--dur) ease; }
+  .face img { width: 72px; height: 72px; object-fit: cover; border-radius: var(--radius);
+              background: var(--line); flex: none; }
+  .face .meta { min-width: 0; font-size: .8rem; line-height: 1.5; }
+  .face .meta .nm { font-weight: 600; font-size: .88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .face .meta .sc { color: var(--muted); }
+  .face .actions { display: flex; gap: 8px; margin-top: 8px; }
+  .face .actions button { font-size: .72rem; padding: 6px 12px; border-radius: var(--radius);
+                          border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+                          cursor: pointer; font-family: inherit;
+                          transition: border-color var(--dur) ease, color var(--dur) ease, background var(--dur) ease; }
+  .face .actions button:hover { border-color: var(--primary); color: var(--text); }
+  .face .actions button.on-ok { border-color: var(--ok); color: var(--ok); background: var(--ok-bg); }
+  .face .actions button.on-no { border-color: var(--bad); color: var(--bad); background: var(--bad-bg); }
+  .face.confirmed { outline: 2px solid var(--ok); outline-offset: 2px; }
+  .face.rejected { opacity: .45; }
+
+  /* ---------- tables ---------- */
+  table.tbl { width: 100%; border-collapse: collapse; font-size: .875rem; }
+  .tbl-wrap { overflow-x: auto; }
+  .tbl th { text-align: left; color: var(--muted); font-weight: 600; padding: 8px 16px;
+            border-bottom: 1px solid var(--line); white-space: nowrap; }
+  .tbl td { padding: 8px 16px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  .tbl img.thumb { width: 44px; height: 44px; object-fit: cover; border-radius: var(--radius); background: var(--line); }
+  .tbl input[type=text], .modal input[type=text] { background: var(--bg); border: 1px solid var(--line);
+      color: var(--text); border-radius: var(--radius); padding: 8px 16px; font-size: .875rem;
+      width: 100%; transition: border-color var(--dur) ease; }
+  .tbl input[type=text]:focus, .modal input[type=text]:focus { border-color: var(--primary); }
+  .tag { font-size: .7rem; padding: 2px 8px; border-radius: var(--radius); background: var(--panel2);
+         border: 1px solid var(--line); color: var(--muted); }
+  .tag.auto { border-color: var(--ok); color: var(--ok); background: var(--ok-bg); }
+
+  /* ---------- misc ---------- */
+  #annotated { max-width: 100%; height: auto; border-radius: var(--radius); border: 1px solid var(--line); }
+  .muted { color: var(--muted); font-size: .875rem; }
+  .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line);
+          border-top-color: var(--primary); border-radius: 50%; animation: r 0.8s linear infinite; vertical-align: -2px; }
+  @keyframes r { to { transform: rotate(360deg); } }
+
+  #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+           background: var(--text); border: 1px solid var(--text); color: #ffffff;
+           padding: 16px 24px; border-radius: var(--radius); font-size: .875rem; display: none;
+           max-width: 90vw; z-index: 50; transition: opacity var(--dur) ease; }
+  #toast.err { background: var(--bad); border-color: var(--bad); }
+
+  .modal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 40;
+              align-items: center; justify-content: center; padding: 24px; }
+  .modal-bg.show { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+           padding: 24px; width: 100%; max-width: 380px; }
+  .modal h3 { margin: 0 0 16px; font-size: 1rem; font-weight: 600; }
+  .modal label { display: block; font-size: .78rem; color: var(--muted); margin: 16px 0 8px; }
+
+  .hidden { display: none !important; }
+  @media (max-width: 768px) {
+    main, nav, header { padding-left: 16px; padding-right: 16px; }
+    .face { flex-direction: column; }
+    .face img { width: 100%; height: 136px; }
+    .btn { width: 100%; }
+    .row .btn, .row button { width: auto; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>AI <span>Attendance</span></h1>
+  <div class="chips">
+    <span class="chip">Students <b id="stat-students">-</b></span>
+    <span class="chip">Samples <b id="stat-samples">-</b></span>
+    <span class="chip">Model <b id="stat-model">-</b></span>
+  </div>
+  <div id="token-wrap">
+    API token required &nbsp;<input id="token" type="password" placeholder="X-API-Token">
+  </div>
+</header>
+
+<nav>
+  <button class="tab-btn active" data-tab="recognize">Recognize</button>
+  <button class="tab-btn" data-tab="register">Register</button>
+  <button class="tab-btn" data-tab="samples">Add Samples</button>
+  <button class="tab-btn" data-tab="profiles">Profiles</button>
+</nav>
+
+<main>
+  <!-- ======================= RECOGNIZE ======================= -->
+  <section class="tab active" id="tab-recognize">
+    <div class="card">
+      <h2>Recognize a group photo</h2>
+      <p class="hint">Upload a class photo. Every face is matched against the student gallery.
+        Green = confident match, yellow = needs your review, red = unknown.
+        Confident matches are added to the gallery automatically (auto-training),
+        so recognition keeps improving. Confirm the yellow ones to teach the
+        system, then download the attendance list.</p>
+      <div class="drop" id="rec-drop">Click or drop a group photo here (JPG / PNG / HEIC)</div>
+      <input type="file" id="rec-file" accept="image/*" class="hidden">
+      <div class="row">
+        <img id="rec-preview" class="hidden" style="max-height:90px;border-radius:8px;border:1px solid var(--line)">
+        <button class="btn" id="rec-run" disabled>Analyze photo</button>
+        <span id="rec-status" class="muted"></span>
+      </div>
+    </div>
+    <div class="card hidden" id="rec-results">
+      <h2>Results</h2>
+      <div class="badges" id="rec-counts"></div>
+      <div class="badges" id="rec-learned" style="margin-top:-6px"></div>
+      <div class="row" style="margin:0 0 12px">
+        <button class="btn ghost small" id="rec-csv" disabled>Download attendance CSV</button>
+        <button class="btn ghost small" id="rec-img" disabled>Download annotated image</button>
+        <span id="rec-timings" class="muted"></span>
+      </div>
+      <div class="grid" id="rec-faces"></div>
+      <div class="hidden" style="margin-top:16px">
+        <p class="muted" style="margin:0 0 8px">Annotated photo</p>
+        <img id="annotated" alt="annotated">
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= REGISTER ======================= -->
+  <section class="tab" id="tab-register">
+    <div class="card">
+      <h2>Register new students</h2>
+      <p class="hint">Upload a photo containing students that are not in the gallery yet.
+        Faces that already match confidently are skipped automatically.
+        Assign a student ID and name to each new face, then save.</p>
+      <div class="drop" id="reg-drop">Click or drop a photo with unregistered students</div>
+      <input type="file" id="reg-file" accept="image/*" class="hidden">
+      <div class="row"><span id="reg-status" class="muted"></span></div>
+    </div>
+    <div class="card hidden" id="reg-results">
+      <h2>New faces <span class="muted" id="reg-count" style="font-weight:400"></span></h2>
+      <div class="grid" id="reg-cards"></div>
+      <div class="row">
+        <button class="btn" id="reg-save" disabled>Save registrations</button>
+        <span id="reg-save-status" class="muted"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= ADD SAMPLES ======================= -->
+  <section class="tab" id="tab-samples">
+    <div class="card">
+      <h2>Add face samples to existing students</h2>
+      <p class="hint">Upload one or more enrollment photos. Matches scoring
+        <b>&ge; 0.70</b> are pre-selected; scores between <b>0.55</b> and <b>0.70</b> need your
+        confirmation. More samples per student means better recognition on real group photos.</p>
+      <div class="drop" id="sam-drop">Click or drop enrollment photos here (multiple files allowed)</div>
+      <input type="file" id="sam-file" accept="image/*" multiple class="hidden">
+      <div class="row"><span id="sam-status" class="muted"></span></div>
+    </div>
+    <div class="card hidden" id="sam-results">
+      <h2>Proposed samples</h2>
+      <div class="tbl-wrap">
+        <table class="tbl" id="sam-table">
+          <thead><tr>
+            <th></th><th>Face</th><th>Student</th><th>ID</th><th>Score</th><th></th><th>Keep</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="row">
+        <button class="btn" id="sam-commit" disabled>Add selected samples</button>
+        <span id="sam-commit-status" class="muted"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= PROFILES ======================= -->
+  <section class="tab" id="tab-profiles">
+    <div class="card">
+      <h2>Student profiles</h2>
+      <p class="hint">All registered students. Editing a profile keeps every stored face sample;
+        deleting removes the profile, its samples and its crop. Confident
+        recognitions add samples automatically (capped per student).</p>
+      <div class="tbl-wrap">
+        <table class="tbl" id="prof-table">
+          <thead><tr><th>Photo</th><th>Student ID</th><th>Name</th><th>Samples</th><th>Actions</th></tr></thead>
+          <tbody><tr><td colspan="5" class="muted">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- edit modal -->
+<div class="modal-bg" id="edit-modal">
+  <div class="modal">
+    <h3>Edit profile</h3>
+    <label>Student ID</label><input type="text" id="edit-id">
+    <label>Name</label><input type="text" id="edit-name">
+    <div class="row" style="justify-content:flex-end">
+      <button class="btn ghost small" id="edit-cancel">Cancel</button>
+      <button class="btn small" id="edit-save">Save changes</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const TOKEN_REQUIRED = {{ 'true' if api_token_required else 'false' }};
+let TOKEN = localStorage.getItem('attendance_token') || '';
+if (TOKEN_REQUIRED) {
+  document.getElementById('token-wrap').classList.add('show');
+  const el = document.getElementById('token');
+  el.value = TOKEN;
+  el.addEventListener('change', () => { TOKEN = el.value.trim(); localStorage.setItem('attendance_token', TOKEN); });
+}
+
+/* ---------------- helpers ---------------- */
+function $(id) { return document.getElementById(id); }
+function toast(msg, err) {
+  const t = $('toast');
+  t.textContent = msg; t.className = err ? 'err' : ''; t.style.display = 'block';
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 3500);
+}
+async function api(path, opts = {}) {
+  const headers = Object.assign({}, opts.headers || {});
+  if (TOKEN) headers['X-API-Token'] = TOKEN;
+  if (opts.json !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(opts.json);
+  }
+  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+const b64img = (b64) => 'data:image/jpeg;base64,' + b64;
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function wireDrop(dropId, inputId, handler, multiple) {
+  const drop = $(dropId), input = $(inputId);
+  drop.addEventListener('click', () => input.click());
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('drag'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
+  drop.addEventListener('drop', e => {
+    e.preventDefault(); drop.classList.remove('drag');
+    handler(multiple ? e.dataTransfer.files : e.dataTransfer.files[0]);
+  });
+  input.addEventListener('change', () => handler(multiple ? input.files : input.files[0]));
+}
+
+async function refreshStats() {
+  try {
+    const s = await api('/api/stats');
+    $('stat-students').textContent = s.students;
+    $('stat-samples').textContent = s.total_samples;
+    $('stat-model').textContent = s.model;
+    if (!s.core_ready) toast('Recognition core not available: ' + (s.model ? '' : '') + 'check server logs', true);
+  } catch (e) { toast('Stats failed: ' + e.message, true); }
+}
+
+/* ---------------- tabs ---------------- */
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(s => s.classList.remove('active'));
+    btn.classList.add('active');
+    $('tab-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'profiles') loadProfiles();
+  });
+});
+
+/* ---------------- RECOGNIZE ---------------- */
+let recData = null;
+wireDrop('rec-drop', 'rec-file', file => {
+  if (!file) return;
+  recData = null;
+  $('rec-preview').src = URL.createObjectURL(file);
+  $('rec-preview').classList.remove('hidden');
+  $('rec-run').disabled = false;
+  $('rec-results').classList.add('hidden');
+}, false);
+
+$('rec-run').addEventListener('click', async () => {
+  const file = $('rec-file').files[0] || await fetch($('rec-preview').src).then(r => r.blob());
+  if (!file) return;
+  $('rec-run').disabled = true;
+  $('rec-status').innerHTML = '<span class="spin"></span> Detecting faces...';
+  try {
+    const fd = new FormData();
+    fd.append('image', file, 'photo.jpg');
+    recData = await api('/api/recognize', { method: 'POST', body: fd });
+    renderRecognize(recData);
+  } catch (e) { toast('Recognition failed: ' + e.message, true); }
+  $('rec-status').textContent = '';
+  $('rec-run').disabled = false;
+});
+
+function renderRecognize(data) {
+  $('rec-results').classList.remove('hidden');
+  const c = data.counts;
+  $('rec-counts').innerHTML =
+    `<span class="badge match">${c.match} match</span>` +
+    `<span class="badge review">${c.review} to review</span>` +
+    `<span class="badge unknown">${c.unknown} unknown</span>` +
+    `<span class="badge dim">${data.faces.length} faces total</span>`;
+  $('rec-timings').textContent = data.timings || '';
+  const learnedOk = (data.learned || []).filter(l => l.learned);
+  const skipped = (data.learned || []).length - learnedOk.length;
+  let learnedHtml = '';
+  if (learnedOk.length) {
+    learnedHtml = '<span class="badge learned">Auto-trained +' + learnedOk.length +
+      ' sample' + (learnedOk.length > 1 ? 's' : '') + ': ' +
+      learnedOk.map(l => esc(l.name)).join(', ') + '</span>';
+  } else if (skipped) {
+    learnedHtml = '<span class="badge dim">No new samples - all confident faces already stored</span>';
+  }
+  if (!data.auto_learn && data.faces.length) {
+    learnedHtml = '<span class="badge dim">Auto-training is disabled on the server</span>';
+  }
+  $('rec-learned').innerHTML = learnedHtml;
+  const grid = $('rec-faces');
+  grid.innerHTML = '';
+  data.faces.forEach(f => {
+    const div = document.createElement('div');
+    div.className = 'face';
+    div.dataset.status = f.status;
+    const known = f.status !== 'UNKNOWN';
+    div.innerHTML =
+      `<img src="${b64img(f.crop_b64)}" alt="face">` +
+      `<div class="meta"><div class="nm">${known ? esc(f.name) : 'Unknown'}</div>` +
+      `<div class="sc">${known ? 'ID ' + esc(f.student_id) + ' &middot; ' : ''}score ${f.score.toFixed(3)}</div>` +
+      `<span class="badge ${f.status.toLowerCase()}">${f.status}</span>` +
+      `<div class="actions"></div></div>`;
+    if (f.status === 'REVIEW') {
+      const actions = div.querySelector('.actions');
+      const ok = document.createElement('button'); ok.textContent = 'Confirm & teach';
+      const no = document.createElement('button'); no.textContent = 'Reject';
+      ok.addEventListener('click', async () => {
+        ok.disabled = true; no.disabled = true;
+        ok.innerHTML = '<span class="spin"></span>';
+        try {
+          const res = await api('/api/learn', { method: 'POST', json: { student_id: f.student_id, embedding: f.embedding } });
+          div.classList.add('confirmed'); ok.classList.add('on-ok');
+          toast(res.learned
+            ? `${res.name}: new sample stored (${res.samples} samples now)`
+            : `${res.name}: already stored, nothing changed`);
+        } catch (e) {
+          ok.textContent = 'Confirm & teach'; ok.disabled = false; no.disabled = false;
+          toast('Could not learn this face: ' + e.message, true);
+        }
+      });
+      no.addEventListener('click', () => { div.classList.toggle('rejected'); div.classList.remove('confirmed'); no.classList.toggle('on-no'); ok.classList.remove('on-ok'); });
+      actions.append(ok, no);
+    }
+    grid.appendChild(div);
+  });
+  if (data.annotated_b64) $('annotated').src = b64img(data.annotated_b64);
+  $('rec-csv').disabled = !data.faces.length;
+  $('rec-img').disabled = !data.annotated_b64;
+  if (learnedOk.length) refreshStats();
+}
+
+function confirmedFaces() {
+  if (!recData) return [];
+  return recData.faces.filter(f => {
+    const el = $('rec-faces').children[f.index === undefined ? 0 : recData.faces.indexOf(f)];
+    if (f.status === 'MATCH') return true;
+    if (f.status === 'REVIEW') return el && el.classList.contains('confirmed');
+    return false;
+  });
+}
+
+$('rec-csv').addEventListener('click', () => {
+  const rows = confirmedFaces();
+  if (!rows.length) { toast('Nothing confirmed yet', true); return; }
+  let csv = 'student_id,name,score\n' +
+    rows.map(f => `${f.student_id},"${f.name.replace(/"/g, '""')}",${f.score}`).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = 'attendance_' + new Date().toISOString().slice(0, 10) + '.csv';
+  a.click();
+});
+
+$('rec-img').addEventListener('click', () => {
+  if (!recData || !recData.annotated_b64) return;
+  const a = document.createElement('a');
+  a.href = b64img(recData.annotated_b64);
+  a.download = 'annotated.jpg';
+  a.click();
+});
+
+/* ---------------- REGISTER ---------------- */
+let regCandidates = [];
+wireDrop('reg-drop', 'reg-file', async file => {
+  if (!file) return;
+  $('reg-status').innerHTML = '<span class="spin"></span> Finding unregistered faces...';
+  $('reg-results').classList.add('hidden');
+  try {
+    const fd = new FormData();
+    fd.append('image', file, 'photo.jpg');
+    const data = await api('/api/register', { method: 'POST', body: fd });
+    regCandidates = data.candidates;
+    renderRegister(regCandidates);
+  } catch (e) { toast('Registration scan failed: ' + e.message, true); }
+  $('reg-status').textContent = '';
+}, false);
+
+function renderRegister(candidates) {
+  $('reg-results').classList.remove('hidden');
+  $('reg-count').textContent = candidates.length ? `(${candidates.length} new face${candidates.length > 1 ? 's' : ''})` : '';
+  const grid = $('reg-cards');
+  grid.innerHTML = '';
+  if (!candidates.length) {
+    grid.innerHTML = '<p class="muted">No new faces found - everyone in this photo already matches the gallery.</p>';
+    $('reg-save').disabled = true;
+    return;
+  }
+  candidates.forEach((c, i) => {
+    const div = document.createElement('div');
+    div.className = 'face';
+    div.style.flexDirection = 'column';
+    div.innerHTML =
+      `<img src="${b64img(c.crop_b64)}" style="width:100%;height:150px" alt="face">` +
+      `<div class="meta" style="width:100%">` +
+      `<label style="display:flex;gap:6px;align-items:center;margin-bottom:6px">` +
+      `<input type="checkbox" class="reg-keep" checked> <span class="muted">Register this face</span></label>` +
+      (c.best_match_name ? `<div class="sc">Similar to ${esc(c.best_match_name)} (${c.best_score.toFixed(2)})</div>` : '') +
+      `<label class="muted">Student ID</label><input type="text" data-i="${i}" class="reg-id">` +
+      `<label class="muted">Name</label><input type="text" data-i="${i}" class="reg-name"></div>`;
+    grid.appendChild(div);
+  });
+  $('reg-save').disabled = false;
+}
+
+$('reg-save').addEventListener('click', async () => {
+  const ids = [...document.querySelectorAll('.reg-id')];
+  const names = [...document.querySelectorAll('.reg-name')];
+  const keeps = [...document.querySelectorAll('.reg-keep')];
+  const entries = [];
+  for (let i = 0; i < regCandidates.length; i++) {
+    if (!keeps[i] || !keeps[i].checked) continue;
+    const id = ids[i].value.trim(), name = names[i].value.trim();
+    if (!id || !name) { toast('Every selected face needs both an ID and a name (untick spurious detections)', true); return; }
+    entries.push({ student_id: id, name, embedding: regCandidates[i].embedding, crop_b64: regCandidates[i].crop_b64 });
+  }
+  if (!entries.length) { toast('No faces selected for registration', true); return; }
+  $('reg-save-status').innerHTML = '<span class="spin"></span> Saving...';
+  try {
+    const res = await api('/api/register/save', { method: 'POST', json: { new: entries, appends: [] } });
+    toast(`Registered ${res.added.length} student${res.added.length > 1 ? 's' : ''}`);
+    $('reg-results').classList.add('hidden');
+    $('reg-cards').innerHTML = '';
+    refreshStats();
+  } catch (e) { toast('Save failed: ' + e.message, true); }
+  $('reg-save-status').textContent = '';
+});
+
+/* ---------------- ADD SAMPLES ---------------- */
+let samProposals = [];
+wireDrop('sam-drop', 'sam-file', async files => {
+  if (!files || !files.length) return;
+  $('sam-status').innerHTML = '<span class="spin"></span> Scanning ' + files.length + ' photo(s)...';
+  $('sam-results').classList.add('hidden');
+  try {
+    const fd = new FormData();
+    [...files].forEach(f => fd.append('files', f, 'photo.jpg'));
+    const data = await api('/api/add-samples', { method: 'POST', body: fd });
+    samProposals = data.proposals;
+    renderSamples(samProposals);
+  } catch (e) { toast('Scan failed: ' + e.message, true); }
+  $('sam-status').textContent = '';
+}, true);
+
+function renderSamples(proposals) {
+  $('sam-results').classList.remove('hidden');
+  const tbody = $('sam-table').querySelector('tbody');
+  tbody.innerHTML = '';
+  if (!proposals.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="muted">No recognizable faces in the uploaded photos.</td></tr>';
+    $('sam-commit').disabled = true;
+    return;
+  }
+  proposals.forEach((p, i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td><input type="checkbox" class="sam-keep" ${p.auto_add ? 'checked' : ''}></td>` +
+      `<td><img class="thumb" src="${b64img(p.crop_b64)}"></td>` +
+      `<td>${esc(p.name)}</td><td>${esc(p.student_id)}</td>` +
+      `<td>${p.score.toFixed(3)}</td>` +
+      `<td>${p.auto_add ? '<span class="tag auto">auto &ge; 0.70</span>' : '<span class="tag">review</span>'}</td>` +
+      `<td></td>`;
+    tbody.appendChild(tr);
+  });
+  $('sam-commit').disabled = false;
+}
+
+$('sam-commit').addEventListener('click', async () => {
+  const checked = [...document.querySelectorAll('.sam-keep')];
+  const additions = [];
+  samProposals.forEach((p, i) => { if (checked[i] && checked[i].checked) additions.push({ student_id: p.student_id, embedding: p.embedding }); });
+  if (!additions.length) { toast('No samples selected', true); return; }
+  $('sam-commit-status').innerHTML = '<span class="spin"></span> Adding...';
+  try {
+    const res = await api('/api/add-samples/commit', { method: 'POST', json: { additions } });
+    const desc = Object.entries(res.added_samples).map(([sid, n]) => `${sid} (+${n})`).join(', ');
+    toast(`Added samples for: ${desc}`);
+    $('sam-results').classList.add('hidden');
+    refreshStats();
+  } catch (e) { toast('Commit failed: ' + e.message, true); }
+  $('sam-commit-status').textContent = '';
+});
+
+/* ---------------- PROFILES ---------------- */
+let editingSid = null;
+async function loadProfiles() {
+  const tbody = $('prof-table').querySelector('tbody');
+  try {
+    const data = await api('/api/profiles');
+    if (!data.profiles.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="muted">No profiles registered yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.profiles.map(p => `
+      <tr>
+        <td>${p.face_key ? `<img class="thumb" src="/api/crops/${p.face_key}">` : ''}</td>
+        <td>${esc(p.student_id)}</td>
+        <td>${esc(p.name)}</td>
+        <td>${p.samples}</td>
+        <td>
+          <button class="btn ghost small" onclick="editProfile('${esc(p.student_id)}','${esc(p.name)}')">Edit</button>
+          <button class="btn danger small" onclick="deleteProfile('${esc(p.student_id)}','${esc(p.name)}')">Delete</button>
+        </td>
+      </tr>`).join('');
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">Failed to load: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+window.editProfile = (sid, name) => {
+  editingSid = sid;
+  $('edit-id').value = sid;
+  $('edit-name').value = name;
+  $('edit-modal').classList.add('show');
+};
+$('edit-cancel').addEventListener('click', () => $('edit-modal').classList.remove('show'));
+$('edit-save').addEventListener('click', async () => {
+  try {
+    await api(`/api/profiles/${encodeURIComponent(editingSid)}`, {
+      method: 'PUT',
+      json: { name: $('edit-name').value.trim(), new_student_id: $('edit-id').value.trim() }
+    });
+    toast('Profile updated');
+    $('edit-modal').classList.remove('show');
+    loadProfiles();
+    refreshStats();
+  } catch (e) { toast('Update failed: ' + e.message, true); }
+});
+
+window.deleteProfile = async (sid, name) => {
+  if (!confirm(`Delete ${name} (ID ${sid}) and all stored face samples? This cannot be undone (a gallery backup is kept on the server).`)) return;
+  try {
+    await api(`/api/profiles/${encodeURIComponent(sid)}`, { method: 'DELETE' });
+    toast(`Deleted ${name}`);
+    loadProfiles();
+    refreshStats();
+  } catch (e) { toast('Delete failed: ' + e.message, true); }
+};
+
+refreshStats();
+</script>
+</body>
+</html>
